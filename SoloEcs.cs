@@ -498,7 +498,6 @@ Repeat:
         }
 
         public void Reset() {
-
         }
 
         public Entity[] WithOnly<T>() where T : struct {
@@ -519,7 +518,6 @@ Repeat:
 #else
                 ComponentLayer<Dirty<T>>.WorldPools[_world.Index];
 #endif
-
             WithChecks[_withCount++] = pool.HasItem;
             return this;
         }
@@ -555,6 +553,10 @@ Repeat:
         }
 
         public Filter Without<T>() where T : struct {
+#if SOLOECS_LAZYPOOLS
+            ComponentLayer<T>.TryRegister(_world.Index, _world.Capacity);
+            ComponentLayer<Added<T>>.TryRegister(_world.Index, _world.Capacity);
+#endif
             WithoutChecks[_withoutCount++] = ComponentLayer<T>.WorldPools[_world.Index].HasItem;
             return this;
         }
@@ -576,14 +578,6 @@ Repeat:
             pool.HasItem[sparseIndex] = false;
             goto Repeat;
         }
-
-        //PoolBase GetPoolByMode<T>(Modes mode) where T : struct {
-        //    switch (mode) {
-        //        case Modes.Added: return ComponentLayer<Added<T>>.WorldPools[_world.Index];
-        //        case Modes.Removed: return ComponentLayer<T>.WorldPools[_world.Index];
-        //        default: return ComponentLayer<T>.WorldPools[_world.Index];
-        //    }
-        //}
 
         void HandleWith(PoolBase pool) {
             bool maySelectBaseSet = false;
