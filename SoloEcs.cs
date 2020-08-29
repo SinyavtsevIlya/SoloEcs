@@ -1,11 +1,13 @@
 ﻿#define SOLOECS_LAZYPOOLS
-//#define SOLOECS_REACTIVE
+#define SOLOECS_REACTIVE
 #define SOLOECS_DI
 #define SOLOECS_SINGLEWORLD
 
 using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
 #if SOLOECS_DI
 using System.Reflection; 
 #endif
@@ -27,7 +29,7 @@ namespace SoloEcs {
         Dictionary<Type, object> _dependencies = new Dictionary<Type, object>(32);
         Dictionary<Type, object[]> _optionalArguments = new Dictionary<Type, object[]>(32);
 #endif
-
+         
         public void Initialize() {
 #if SOLOECS_DI
             for (int i = 0; i < AllSystems.Count; i++) {
@@ -156,6 +158,14 @@ namespace SoloEcs {
             }
             ClearSets(_dirtyMarkers);
             ClearSets(_addedMarkers);
+
+            for (int i = 0; i < Worlds.Count; i++) {
+                var world = Worlds.Values[i];
+                var destroyPool = world.DestroyPool;
+                for (int ii = 0; ii < destroyPool.Count; ii++) {
+                    world.DestroyInternal(destroyPool.Values[ii]);
+                }
+            }
         }
 
         void ClearSets(ResizableArray<DirtyPair>[] markers) {
@@ -191,6 +201,7 @@ namespace SoloEcs {
         internal DirtyPair AddedMarker;
         internal Filter[] FiltersPool;
         internal int CurrentFilterIdx;
+        internal ResizableArray<Entity> DestroyPool;
 
         int[] _reservedEntities;
         int _reservedEntitiesCount;
@@ -208,6 +219,7 @@ namespace SoloEcs {
             WorldsState.WorldsPools[Index] = new ResizableArray<PoolBase>(WorldsState.MaxComponentsCount);
             DirtyMarker = DirtyPair.Empty;
             AddedMarker = DirtyPair.Empty;
+            DestroyPool = new ResizableArray<Entity>(64);
         }
 
 #if !SOLOECS_LAZYPOOLS
@@ -221,7 +233,7 @@ namespace SoloEcs {
         }
 #endif
 
-        public Entity CreateEntity() {
+        public Entity CreateEntity(int componentsCapacity = 8) {
             int id;
             if (_reservedEntitiesCount > 0) {
                 _reservedEntitiesCount--;
@@ -232,7 +244,7 @@ namespace SoloEcs {
             }
             _entitiesCount++;
 
-            var entity = new Entity() { World = this };
+            var entity = new Entity() { World = this, Composition = new ByteSparseSet(componentsCapacity) };
 
             if (id == entities.Length) {
                 Array.Resize(ref entities, _entitiesCount << 1);
@@ -246,15 +258,14 @@ namespace SoloEcs {
             return entity;
         }
 
-        public void Destroy(int id) {
-            if (_entitiesCount == 0) return;
-            Destroy(entities[id]);
+        public void Destroy(Entity entity) {
+            DestroyPool.Add(entity);
         }
 
-        public void Destroy(Entity entity) {
+        internal void DestroyInternal(Entity entity) {
             _entitiesCount--;
 
-            if (entity.IsReserved) throw new System.Exception("Unable to destroy reserved entity " + entity.Id);
+            if (entity.IsReserved) throw new System.Exception($"Unable to destroy reserved entity {entity.Id}");
 
             entity.IsReserved = true;
 
@@ -263,6 +274,13 @@ namespace SoloEcs {
             if (_reservedEntitiesCount == _reservedEntities.Length) {
                 Array.Resize(ref _reservedEntities, _reservedEntitiesCount << 1);
             }
+
+            for (int i = 0; i < entity.Composition.Count; i++) {
+                WorldsState.WorldsPools[Index].Values[entity.Composition.Dense[i]].DeactivateAtIndexBase(entity.Id);
+            }
+
+            UnityEngine.Debug.Log("entities count " + _entitiesCount);
+            UnityEngine.Debug.Log("_reservedEntities count " + _reservedEntitiesCount);
 
             entity.Gen++;
         }
@@ -315,8 +333,8 @@ namespace SoloEcs {
         public int Id;
         public ushort Gen;
         public bool IsReserved;
-        internal World World;
-
+        public World World;
+        internal ByteSparseSet Composition;
 
         public void Toggle<TComponent>() where TComponent : struct {
             var pool = ComponentLayer<TComponent>.WorldPools[World.Index];
@@ -332,7 +350,8 @@ namespace SoloEcs {
 #endif
             var pool = ComponentLayer<TComponent>.WorldPools[World.Index];
 #if SOLOECS_REACTIVE
-            ComponentLayer<Added<TComponent>>.WorldPools[World.Index].ActivateAtIndexNoItemsTracking(Id);
+            var addedPool = ComponentLayer<Added<TComponent>>.WorldPools[World.Index];
+            addedPool.ActivateAtIndexNoItemsTracking(Id);
             World.SetAdded<TComponent>();
 #endif
 
@@ -342,16 +361,22 @@ namespace SoloEcs {
             }
 #endif
             ref var c = ref pool.ActivateAtIndex(Id, this);
+            for (var i = 0; i < Composition.Count; i++) {
+                var _ = Composition.Dense[i];
+            }
+            Composition.Add(pool.TypeIndex);
             return ref c;
         }
 
         public void Remove<TComponent>() where TComponent : struct {
-            ComponentLayer<TComponent>.WorldPools[World.Index].DeactivateAtIndex(Id);
+            var pool = ComponentLayer<TComponent>.WorldPools[World.Index];
+            pool.DeactivateAtIndex(Id);
+            Composition.Remove(pool.TypeIndex);
         }
 
         public ref TComponent Get<TComponent>() where TComponent : struct {
 #if SOLOECS_SINGLEWORLD
-            return ref ComponentLayer<TComponent>.Singleton.items[Id];
+            return ref ComponentLayer<TComponent>.Singleton.Items[Id];
 #else
             return ref ComponentLayer<TComponent>.WorldPools[World.Index].items[Id];
 #endif
@@ -385,26 +410,26 @@ namespace SoloEcs {
 #if SOLOECS_SINGLEWORLD
         public static Pool<T> Singleton; 
 #endif
-        public static int[] Indecies;
+        public static byte[] Indecies;
         static ComponentLayer() {
-#if SOLOECS_SINGLEWORLD
-            Singleton = new Pool<T>(1024); 
-#endif
             WorldPools = new Pool<T>[WorldsState.Count];
-            Indecies = new int[WorldsState.Count];
+            Indecies = new byte[WorldsState.Count];
             for (int i = 0; i < WorldsState.Count; i++) {
-                Indecies[i] = -1;
+                Indecies[i] = 255;
             }
         }
 
         internal static void TryRegister(int worldIndex, int capacity) {
-            if (Indecies[worldIndex] == -1) {
-                var pool = new Pool<T>(capacity);
+            if (Indecies[worldIndex] == 255) {
+                Indecies[worldIndex] = Convert.ToByte(WorldsState.TypeIndeciesCounts[worldIndex]++);
+                var pool = new Pool<T>(capacity, Indecies[worldIndex]);
+#if UNITY_EDITOR
+                pool.Type = typeof(T);
+#endif
                 WorldPools[worldIndex] = pool;
 #if SOLOECS_SINGLEWORLD
                 Singleton = pool;
 #endif
-                Indecies[worldIndex] = WorldsState.TypeIndeciesCounts[worldIndex]++;
                 WorldsState.WorldsPools[worldIndex].Add(pool);
             }
         }
@@ -477,7 +502,6 @@ namespace SoloEcs {
 #endif
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public bool MoveNext() {
-
 Repeat:
             if (--_currentIndex < 0) return false;
             var sparseIndex = _baseSet.Dense[_currentIndex];
@@ -518,6 +542,9 @@ Repeat:
 #else
                 ComponentLayer<Dirty<T>>.WorldPools[_world.Index];
 #endif
+            // Ensure that secondary checks-pool has the 
+            // Same length as a base pool for safe iteration
+            pool.CheckID(_baseSet.Sparse.Length - 1); 
             WithChecks[_withCount++] = pool.HasItem;
             return this;
         }
@@ -572,9 +599,12 @@ Repeat:
             WithChecks[_withIndexToRemove] = WithChecks[--_withCount];
             var pool = WorldsState.WorldsPools[_world.Index].Values[componentIndex];
 Repeat:
-            if (--_currentIndex < 0) return this;
+            if (--_currentIndex < 0) {
+                UnityEngine.Debug.Log($"pool of {pool.Type} is cleared");
+                return this;
+            }
             var sparseIndex = _baseSet.Dense[_currentIndex];
-
+            //UnityEngine.Debug.Log($"pool.HasItem[sparseIndex] was {pool.HasItem[sparseIndex]} now is false");
             pool.HasItem[sparseIndex] = false;
             goto Repeat;
         }
@@ -599,6 +629,45 @@ Repeat:
         }
     }
 
+    public struct ByteSparseSet {
+        public byte[] Sparse;
+        public byte[] Dense;
+
+        public ByteSparseSet(int denseCapacity) {
+            Sparse = new byte[byte.MaxValue];
+            Dense = new byte[denseCapacity];
+            Count = 0;
+        }
+
+        public byte Count;
+
+        public bool Has(byte index) => Sparse[index] < Count && Dense[Sparse[index]] == index;
+
+        public bool Add(byte index) {
+            if (Has(index)) return false;
+            if (Count >= Dense.Length) {
+                Array.Resize(ref Dense, Dense.Length << 1);
+            }
+            Dense[Count] = index;
+            Sparse[index] = Count++;
+            return true;
+        }
+
+        public bool Remove(byte index) {
+            if (!Has(index)) return false;
+            var lastID = --Count;
+            var last = Dense[lastID];
+            Dense[Sparse[index]] = last;
+            Sparse[last] = Sparse[index];
+            return true;
+        }
+
+        public void Clear() {
+            Count = 0;
+        }
+    }
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
     public class EntitySparseSet {
         public int[] Sparse;
         public int[] Dense;
@@ -612,13 +681,16 @@ Repeat:
 
         public int Count;
 
-        public bool Has(int index) => Sparse[index] < Count && Dense[Sparse[index]] == index;
+        public bool Has(int index) {
+            if (index >= Sparse.Length) return false;
+            return Sparse[index] < Count && Dense[Sparse[index]] == index;
+        }
 
         public void Add(int index, Entity e) {
             if (index >= Sparse.Length || Count >= Dense.Length) {
-                Array.Resize(ref Sparse, Sparse.Length << 1);
-                Array.Resize(ref Dense, Dense.Length << 1);
-                Array.Resize(ref Entities, Entities.Length << 1);
+                Array.Resize(ref Sparse, Ops.NPO2(index + 1));
+                Array.Resize(ref Dense, Ops.NPO2(index + 1));
+                Array.Resize(ref Entities, Ops.NPO2(index + 1));
             }
             Dense[Count] = index;
             Entities[Count] = e;
@@ -631,6 +703,7 @@ Repeat:
             Dense[Sparse[index]] = last;
             Entities[Sparse[index]] = Entities[lastID];
             Sparse[last] = Sparse[index];
+    
         }
 
         public void Clear() {
@@ -638,59 +711,33 @@ Repeat:
         }
     }
 
-    public class SparseSet {
-        public int[] Sparse;
-        public int[] Dense;
-
-        public SparseSet(int capacity) {
-            Sparse = new int[capacity];
-            Dense = new int[capacity];
-        }
-
-        public int Count;
-
-        public bool Has(int index) => Sparse[index] < Count && Dense[Sparse[index]] == index;
-
-        public void Add(int index, Entity e) {
-            if (index >= Sparse.Length) {
-                Array.Resize(ref Sparse, Sparse.Length << 1);
-                Array.Resize(ref Dense, Dense.Length << 1);
-            }
-            Dense[Count] = index;
-            Sparse[index] = Count++;
-        }
-
-        public void Remove(int index) {
-            var lastID = --Count;
-            var last = Dense[lastID];
-            Dense[Sparse[index]] = last;
-            Sparse[last] = Sparse[index];
-        }
-
-        public void Clear() {
-            Count = 0;
-        }
-    }
-
-    internal class PoolBase {
+    internal abstract class PoolBase {
         internal bool[] HasItem;
         internal EntitySparseSet ActiveItems;
+        internal bool HasCustomDispose; // TODO: provide disposing items
+        internal byte TypeIndex;
+#if UNITY_EDITOR
+        internal Type Type;
+#endif
 
-        public PoolBase(int capacity) {
+        internal abstract void DeactivateAtIndexBase(int id);
+
+        public PoolBase(int capacity, byte typeIndex) {
             HasItem = new bool[capacity];
             ActiveItems = new EntitySparseSet(capacity);
+            TypeIndex = typeIndex;
         }
     }
 
     internal class Pool<T> : PoolBase where T : struct {
-        public T[] items;
+        public T[] Items;
 
-        internal Pool(int capacity) : base(capacity) {
-            items = new T[capacity];
+        internal Pool(int capacity, byte typeIndex) : base(capacity, typeIndex) {
+            Items = new T[capacity];
         }
 
         internal ref T GetAtIndex(int id) {
-            return ref items[id];
+            return ref Items[id];
         }
 
         internal ref T ActivateAtIndex(int id, Entity entity) {
@@ -699,18 +746,26 @@ Repeat:
                 ActiveItems.Add(id, entity);
             }
             HasItem[id] = true;
-            return ref items[id];
+            return ref Items[id];
         }
         internal void ActivateAtIndexNoItemsTracking(int id) {
             CheckID(id);
             HasItem[id] = true;
         }
 
+        internal override void DeactivateAtIndexBase(int id) {
+            DeactivateAtIndex(id);
+        }
+
         internal void DeactivateAtIndex(int id) {
             CheckID(id);
             if (HasItem[id]) {
-                if (ActiveItems.Has(id)) ActiveItems.Remove(id);
+                // TODO: remove the redundant check
+                if (ActiveItems.Has(id)) {
+                    ActiveItems.Remove(id);
+                }
                 HasItem[id] = false;
+                Items[id] = default;
             }
         }
 
@@ -727,17 +782,13 @@ Repeat:
         }
 
         internal bool HasComponentAtIndex(int id) {
-#if UNITY_EDITOR
-            if (id >= HasItem.Length) {
-                throw new Exception($"Unable to check if entity has a component {typeof(T)}. Entity with id {id} doesn't exist");
-            }
-#endif
-            return HasItem[id];
+            return HasItem[id] && id < HasItem.Length;
         }
 
-        void CheckID(int id) {
-            if (id >= items.Length) {
-                Array.Resize(ref items, items.Length << 1);
+        internal void CheckID(int id) {
+            if (id >= Items.Length) {
+                Array.Resize(ref Items, Ops.NPO2(id + 1));
+                Array.Resize(ref HasItem, Ops.NPO2(id + 1));
             }
         }
     }
@@ -787,7 +838,32 @@ Repeat:
         }
     }
 
-    
+#if ENABLE_IL2CPP
+    [Il2CppSetOption (Option.NullChecks, false)]
+    [Il2CppSetOption (Option.ArrayBoundsChecks, false)]
+    [Il2CppSetOption (Option.DivideByZeroChecks, false)]
+#endif
+    public static class Ops {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static int NPO2(in int v) {
+            if (v < 2) {
+                return 2;
+            }
+            var n = v - 1;
+            n |= n >> 1;
+            n |= n >> 2;
+            n |= n >> 4;
+            n |= n >> 8;
+            n |= n >> 16;
+            return n + 1;
+        }
+    }
+
+    public static class SoloExtensions {
+        public static void Dump(this string message) {
+            UnityEngine.Debug.Log(message);
+        }
+    }
 }
 
 
