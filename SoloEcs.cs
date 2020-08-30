@@ -397,7 +397,7 @@ namespace SoloEcs {
     internal static class WorldsState {
         internal static int Count;
         internal static int MaxComponentsCount = 512;
-        internal static int[] TypeIndeciesCounts = new int[16]; // TODO: Replace with actual worlds count
+        internal static int[] TypeIndeciesCounts = new int[16];
         internal static ResizableArray<PoolBase>[] WorldsPools = new ResizableArray<PoolBase>[16];
     }
 
@@ -564,6 +564,22 @@ Repeat:
             return this;
         }
 
+        public Filter With<T1, T2>()
+            where T1 : struct
+            where T2 : struct {
+            With<T1>();
+            return With<T2>();
+        }
+
+        public Filter With<T1, T2, T3>()
+            where T1 : struct
+            where T2 : struct
+            where T3 : struct {
+            With<T1>();
+            With<T2>();
+            return With<T3>();
+        }
+
         public Filter With(int componentIndex) {
             var pool = WorldsState.WorldsPools[_world.Index].Values[componentIndex];
             HandleWith(pool);
@@ -723,9 +739,17 @@ Repeat:
     internal class Pool<T> : PoolBase where T : struct {
         public T[] Items;
 
+        delegate void ResetDelegate(ref T component);
+        ResetDelegate _reset;
+
         internal Pool(int capacity, byte typeIndex) : base(capacity, typeIndex) {
             Items = new T[capacity];
-            if (Items[0] is IDisposable) HasCustomDispose = true;
+
+            if (Items[0] is IReset<T>) {
+                HasCustomDispose = true;
+                var method = typeof(T).GetMethod(nameof(IReset<T>.Reset));
+                _reset = (ResetDelegate)Delegate.CreateDelegate(typeof(ResetDelegate), null, method);
+            }
         }
 
         internal ref T GetAtIndex(int id) {
@@ -734,11 +758,13 @@ Repeat:
 
         internal ref T ActivateAtIndex(int id, Entity entity) {
             CheckID(id);
-            if (!ActiveItems.Has(id)) {
+            if (!HasItem[id]) {
                 ActiveItems.Add(id, entity);
+                HasItem[id] = true;
             }
-            HasItem[id] = true;
-            return ref Items[id];
+            ref var item = ref Items[id];
+            _reset(ref item);
+            return ref item;
         }
         internal void ActivateAtIndexNoItemsTracking(int id) {
             CheckID(id);
@@ -752,15 +778,11 @@ Repeat:
         internal void DeactivateAtIndex(int id) {
             CheckID(id);
             if (HasItem[id]) {
-                // TODO: remove the redundant check
-                if (ActiveItems.Has(id)) {
-                    ActiveItems.Remove(id);
-                }
+                ActiveItems.Remove(id);
                 HasItem[id] = false;
                 ref var item = ref Items[id];
                 if (HasCustomDispose) {
-                    // TODO: measure a boxing occurence 
-                    (item as IDisposable).Dispose();
+                    _reset(ref item);
                 }
                 item = default;
             }
@@ -788,6 +810,10 @@ Repeat:
                 Array.Resize(ref HasItem, Ops.NPO2(id + 1));
             }
         }
+    }
+
+    public interface IReset<T> {
+        void Reset(ref T c);
     }
 
 
