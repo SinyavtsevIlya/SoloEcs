@@ -158,15 +158,6 @@ namespace SoloEcs {
             }
             ClearSets(_dirtyMarkers);
             ClearSets(_addedMarkers);
-
-            for (int worldIdx = 0; worldIdx < Worlds.Count; worldIdx++) {
-                var world = Worlds.Values[worldIdx];
-                var destroyPool = world.DestroyPool;
-                for (int poolIdx = 0; poolIdx < destroyPool.Count; poolIdx++) {
-                    world.DestroyInternal(destroyPool.Values[poolIdx]);
-                }
-                destroyPool.Clear();
-            }
         }
 
         void ClearSets(ResizableArray<DirtyPair>[] markers) {
@@ -202,7 +193,6 @@ namespace SoloEcs {
         internal DirtyPair AddedMarker;
         internal Filter[] FiltersPool;
         internal int CurrentFilterIdx;
-        internal ResizableArray<Entity> DestroyPool;
 
         int[] _reservedEntities;
         int _reservedEntitiesCount;
@@ -220,7 +210,6 @@ namespace SoloEcs {
             WorldsState.WorldsPools[Index] = new ResizableArray<PoolBase>(WorldsState.MaxComponentsCount);
             DirtyMarker = DirtyPair.Empty;
             AddedMarker = DirtyPair.Empty;
-            DestroyPool = new ResizableArray<Entity>(64);
         }
 
 #if !SOLOECS_LAZYPOOLS
@@ -260,10 +249,6 @@ namespace SoloEcs {
         }
 
         public void Destroy(Entity entity) {
-            DestroyPool.Add(entity);
-        }
-
-        internal void DestroyInternal(Entity entity) {
             _entitiesCount--;
 
             if (entity.IsReserved) throw new System.Exception($"Unable to destroy reserved entity {entity.Id}");
@@ -349,6 +334,7 @@ namespace SoloEcs {
 #endif
             var pool = ComponentLayer<TComponent>.WorldPools[World.Index];
 #if SOLOECS_REACTIVE
+            pool.HasAddedPool = true;
             var addedPool = ComponentLayer<Added<TComponent>>.WorldPools[World.Index];
             addedPool.ActivateAtIndexNoItemsTracking(Id);
             World.SetAdded<TComponent>();
@@ -371,6 +357,14 @@ namespace SoloEcs {
             var pool = ComponentLayer<TComponent>.WorldPools[World.Index];
             pool.DeactivateAtIndex(Id);
             Composition.Remove(pool.TypeIndex);
+#if SOLOECS_REACTIVE 
+            if (pool.HasDirtyPool) {
+                ComponentLayer<Dirty<TComponent>>.WorldPools[World.Index].HasItem[Id] = false;
+            }
+            if (pool.HasAddedPool) {
+                ComponentLayer<Added<TComponent>>.WorldPools[World.Index].HasItem[Id] = false;
+            }
+#endif
         }
 
         public ref TComponent Get<TComponent>() where TComponent : struct {
@@ -383,12 +377,15 @@ namespace SoloEcs {
 
         public ref TComponent GetDirty<TComponent>() where TComponent : struct {
             var worldId = World.Index;
-            ref var c = ref ComponentLayer<TComponent>.WorldPools[worldId].GetAtIndex(Id);
 #if SOLOECS_LAZYPOOLS
             ComponentLayer<Dirty<TComponent>>.TryRegister(World.Index, World.Capacity);
 #endif
             ComponentLayer<Dirty<TComponent>>.WorldPools[worldId].ActivateAtIndexNoItemsTracking(Id);
             World.SetDirty<TComponent>();
+
+            var pool = ComponentLayer<TComponent>.WorldPools[worldId];
+            pool.HasDirtyPool = true;
+            ref var c = ref pool.GetAtIndex(Id);
             return ref c;
         }
 
@@ -535,12 +532,7 @@ Repeat:
 #if SOLOECS_LAZYPOOLS
             ComponentLayer<Dirty<T>>.TryRegister(_world.Index, _world.Capacity);
 #endif
-            var pool =
-#if SOLOECS_SINGLEWORLD
-                ComponentLayer<Dirty<T>>.Singleton;
-#else
-                ComponentLayer<Dirty<T>>.WorldPools[_world.Index];
-#endif
+            var pool = ComponentLayer<Dirty<T>>.WorldPools[_world.Index];
             // Ensure that secondary checks-pool has the 
             // Same length as a base pool for safe iteration
             pool.CheckID(_baseSet.Sparse.Length - 1); 
@@ -709,8 +701,12 @@ Repeat:
     internal abstract class PoolBase {
         internal bool[] HasItem;
         internal EntitySparseSet ActiveItems;
-        internal bool HasCustomDispose; // TODO: provide disposing items
+        internal bool HasCustomDispose; 
         internal byte TypeIndex;
+#if SOLOECS_REACTIVE
+        internal bool HasAddedPool;
+        internal bool HasDirtyPool;
+#endif
 #if UNITY_EDITOR
         internal Type Type;
 #endif
@@ -729,6 +725,7 @@ Repeat:
 
         internal Pool(int capacity, byte typeIndex) : base(capacity, typeIndex) {
             Items = new T[capacity];
+            if (Items[0] is IDisposable) HasCustomDispose = true;
         }
 
         internal ref T GetAtIndex(int id) {
@@ -760,7 +757,12 @@ Repeat:
                     ActiveItems.Remove(id);
                 }
                 HasItem[id] = false;
-                Items[id] = default;
+                ref var item = ref Items[id];
+                if (HasCustomDispose) {
+                    // TODO: measure a boxing occurence 
+                    (item as IDisposable).Dispose();
+                }
+                item = default;
             }
         }
 
@@ -832,6 +834,7 @@ Repeat:
             Count = 0;
         }
     }
+
 
 #if ENABLE_IL2CPP
     [Il2CppSetOption (Option.NullChecks, false)]
