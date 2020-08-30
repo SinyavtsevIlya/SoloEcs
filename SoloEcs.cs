@@ -159,12 +159,13 @@ namespace SoloEcs {
             ClearSets(_dirtyMarkers);
             ClearSets(_addedMarkers);
 
-            for (int i = 0; i < Worlds.Count; i++) {
-                var world = Worlds.Values[i];
+            for (int worldIdx = 0; worldIdx < Worlds.Count; worldIdx++) {
+                var world = Worlds.Values[worldIdx];
                 var destroyPool = world.DestroyPool;
-                for (int ii = 0; ii < destroyPool.Count; ii++) {
-                    world.DestroyInternal(destroyPool.Values[ii]);
+                for (int poolIdx = 0; poolIdx < destroyPool.Count; poolIdx++) {
+                    world.DestroyInternal(destroyPool.Values[poolIdx]);
                 }
+                destroyPool.Clear();
             }
         }
 
@@ -279,8 +280,6 @@ namespace SoloEcs {
                 WorldsState.WorldsPools[Index].Values[entity.Composition.Dense[i]].DeactivateAtIndexBase(entity.Id);
             }
 
-            UnityEngine.Debug.Log("entities count " + _entitiesCount);
-            UnityEngine.Debug.Log("_reservedEntities count " + _reservedEntitiesCount);
 
             entity.Gen++;
         }
@@ -599,12 +598,8 @@ Repeat:
             WithChecks[_withIndexToRemove] = WithChecks[--_withCount];
             var pool = WorldsState.WorldsPools[_world.Index].Values[componentIndex];
 Repeat:
-            if (--_currentIndex < 0) {
-                UnityEngine.Debug.Log($"pool of {pool.Type} is cleared");
-                return this;
-            }
+            if (--_currentIndex < 0) return this;
             var sparseIndex = _baseSet.Dense[_currentIndex];
-            //UnityEngine.Debug.Log($"pool.HasItem[sparseIndex] was {pool.HasItem[sparseIndex]} now is false");
             pool.HasItem[sparseIndex] = false;
             goto Repeat;
         }
