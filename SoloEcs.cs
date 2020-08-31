@@ -6,8 +6,6 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
-using System.Diagnostics;
-using System.Runtime.InteropServices;
 #if SOLOECS_DI
 using System.Reflection; 
 #endif
@@ -223,6 +221,18 @@ namespace SoloEcs {
         }
 #endif
 
+        public void Destroy() {
+            for (int i = 0; i < _entitiesCount; i++) {
+                var entity = entities[i];
+                if (!entity.IsReserved) {
+                    Destroy(entity);
+                }
+                WorldsState.Count--;
+            }
+            // TODO: provide full featured worlds pooling
+            throw new NotImplementedException();
+        }
+
         public Entity CreateEntity(int componentsCapacity = 8) {
             int id;
             if (_reservedEntitiesCount > 0) {
@@ -264,7 +274,6 @@ namespace SoloEcs {
             for (int i = 0; i < entity.Composition.Count; i++) {
                 WorldsState.WorldsPools[Index].Values[entity.Composition.Dense[i]].DeactivateAtIndexBase(entity.Id);
             }
-
 
             entity.Gen++;
         }
@@ -717,7 +726,7 @@ Repeat:
     internal abstract class PoolBase {
         internal bool[] HasItem;
         internal EntitySparseSet ActiveItems;
-        internal bool HasCustomDispose; 
+        internal bool HasCustomReset; 
         internal byte TypeIndex;
 #if SOLOECS_REACTIVE
         internal bool HasAddedPool;
@@ -746,7 +755,7 @@ Repeat:
             Items = new T[capacity];
 
             if (Items[0] is IReset<T>) {
-                HasCustomDispose = true;
+                HasCustomReset = true;
                 var method = typeof(T).GetMethod(nameof(IReset<T>.Reset));
                 _reset = (ResetDelegate)Delegate.CreateDelegate(typeof(ResetDelegate), null, method);
             }
@@ -763,7 +772,9 @@ Repeat:
                 HasItem[id] = true;
             }
             ref var item = ref Items[id];
-            _reset(ref item);
+            if (HasCustomReset) {
+                _reset(ref item);
+            }
             return ref item;
         }
         internal void ActivateAtIndexNoItemsTracking(int id) {
@@ -781,10 +792,12 @@ Repeat:
                 ActiveItems.Remove(id);
                 HasItem[id] = false;
                 ref var item = ref Items[id];
-                if (HasCustomDispose) {
+                if (HasCustomReset) {
                     _reset(ref item);
+                } else {
+                    item = default;
                 }
-                item = default;
+                
             }
         }
 
